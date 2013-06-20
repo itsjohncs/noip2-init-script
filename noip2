@@ -1,0 +1,200 @@
+#!/bin/bash
+
+# This is free and unencumbered software released into the public domain.
+#
+# Anyone is free to copy, modify, publish, use, compile, sell, or
+# distribute this software, either in source code form or as a compiled
+# binary, for any purpose, commercial or non-commercial, and by any
+# means.
+#
+# In jurisdictions that recognize copyright laws, the author or authors
+# of this software dedicate any and all copyright interest in the
+# software to the public domain. We make this dedication for the benefit
+# of the public at large and to the detriment of our heirs and
+# successors. We intend this dedication to be an overt act of
+# relinquishment in perpetuity of all present and future rights to this
+# software under copyright law.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+# OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+# ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+#
+# For more information, please refer to <http://unlicense.org/>
+
+### BEGIN INIT INFO
+# Provides:          noip2
+# Required-Start:    remote_fs syslog networking
+# Required-Stop:     remote_fs syslog networking
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Daemon for updating noip.com dynamic DNS records.
+### END INIT INFO
+
+# Get lots of meta data about where we're running from so we can do the evil
+# recurssion.
+DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+ME=`basename $0`
+ME_FULL=$DIR/$ME
+
+# The location of the noip2 process to use
+NOIP2_PATH="/usr/local/bin/noip2"
+
+# Flags to pass to noip2
+NOIP2_FLAGS=""
+
+# The user to run noip2 under
+NOIP2_USER="noip2"
+
+NAME="noip2"
+PIDFILE="/var/run/$NAME.pid"
+
+BOLD=`tput bold`
+RED=`tput setaf 1`
+RED_BOLD=$BOLD$RED
+GREEN_BOLD=$BOLD`tput setaf 2`
+RESET=`tput sgr0`
+
+case "$1" in
+start)
+        # If you are not root below, then su will request a password which could
+        # cause problems since init scripts are usually assumend to not be
+        # interactive.
+        if [[ $EUID -ne 0 ]]; then
+                echo "${RED_BOLD}Must be root.$RESET"
+                exit 4
+        fi
+
+        $ME_FULL status > /dev/null 2>&1
+        CURRENT_STATUS=$?
+        if [[ $CURRENT_STATUS != "3" ]]; then
+                if [[ $CURRENT_STATUS == "1" ]]; then
+                        echo "Starting $NAME: [${RED_BOLD}FAIL$RESET]"
+                        echo "${RED_BOLD}$NAME not running but pidfile exists at $PIDFILE. The pidfile must be removed before restarting Galah.$RESET"
+                        exit 1
+                fi
+
+                echo "Starting $NAME: [${RED_BOLD}ALREADY RUNNING$RESET]"
+                exit 1
+        fi
+
+        echo -n "Starting $NAME: ["
+        COMMAND="$NOIP2_PATH $NOIP2_FLAGS"
+        su -c "$COMMAND > /dev/null 2>&1 &" $NOIP2_USER
+
+        # Give the job a moment to fail/fork.
+        sleep 1
+
+        # noip2 will fork no matter what you do so grab the most recently
+        # started instance.
+        PID=$(pgrep -nf "$NOIP2_PATH")
+
+        RUNNING=`kill -0 $PID 2> /dev/null; echo $?`
+        if [[ -z $PID || $RUNNING != "0" ]]; then
+                echo "${RED_BOLD}FAIL${RESET}]"
+                exit 1
+        else
+                echo $PID > $PIDFILE
+                echo "${GREEN_BOLD}DONE${RESET}]"
+                exit 0
+        fi
+        ;;
+
+status)
+        if [ -f $PIDFILE ]; then
+                PID=`cat $PIDFILE`
+                if kill -0 $PID > /dev/null 2>&1; then
+                        echo "$NAME running, PID $PID."
+                        exit 0
+                else
+                        echo "${RED_BOLD}$NAME not running but pidfile exists at $PIDFILE.$RESET"
+                        exit 1
+                fi
+        else
+                echo "$NAME not running."
+                exit 3
+        fi
+        ;;
+
+stop)
+        echo -n "Stopping $NAME: ["
+
+        if [ -f $PIDFILE ]; then
+                PID=`cat $PIDFILE`
+                KILL_OUTPUT=$(kill -INT $PID 2>&1)
+                if [[ $? == "0" ]]; then
+                        sleep 2
+                        $ME_FULL status > /dev/null 2>&1 == "3"
+                        if [[ $? == "3" || $? == "1" ]]; then
+                                rm -f $PIDFILE
+                                echo "${GREEN_BOLD}DONE$RESET]"
+                                exit 0
+                        else
+                                echo "${RED_BOLD}FAIL$RESET]"
+                                echo "${RED}$NAME ($PID) did not stop in time."
+                                exit 0
+                        fi
+                else
+                        echo "${RED_BOLD}FAIL$RESET]"
+                        echo $RED$KILL_OUTPUT$RESET
+                        exit 1
+                fi
+        else
+                echo "${RED_BOLD}NOT RUNNING$RESET]"
+                exit 0
+        fi
+        ;;
+
+force-reload)
+        # Recurse and call restart
+        $ME_FULL restart
+        exit $?
+        ;;
+
+restart)
+        # Recurse and call stop then start.
+        if $ME_FULL stop; then
+                $ME_FULL start
+                exit $?
+        fi
+        exit $?
+        ;;
+
+reload)
+        echo -n "Ordering $NAME to reload configuration: ["
+
+        if [ -f $PIDFILE ]; then
+                PID=`cat $PIDFILE`
+
+                KILL_OUTPUT=`kill -HUP $PID 2>&1`
+                if [[ $? != "0" ]]; then
+                        echo "${RED_BOLD}FAIL$RESET]"
+                        echo $RED$KILL_OUTPUT$RESET
+                        exit 1
+                fi
+
+                echo "${GREEN_BOLD}DONE$RESET]"
+
+                # Note there's no real way to check the success of this action,
+                # so we have to blindy report success.
+                exit 0
+        else
+                echo "${RED_BOLD}NOT RUNNING$RESET]"
+                exit 7
+        fi
+        ;;
+
+where-pid)
+        echo $PIDFILE
+        ;;
+
+*)
+        echo "Usage: $ME {status|start|stop|restart|force-reload|reload|where-pid}"
+        exit 2
+esac
+
+# A user should not get to this point.
+exit 1
